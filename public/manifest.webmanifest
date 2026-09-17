@@ -1,0 +1,17 @@
+{
+  "name": "听写小助手",
+  "short_name": "听写小助手",
+  "description": "机器念词 · 孩子听写 · 错词自动收集",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#FFF7ED",
+  "theme_color": "#F97316",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
