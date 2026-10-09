@@ -13,6 +13,7 @@ const youdaoUrl = (text: string) =>
 // ---------- 云端音频池：每词一个 <audio>，开始听写时整组预加载并在手势里静音解锁 ----------
 // 之后朗读 / 重读 / 自动念下一个全部瞬时播放，不再等网络
 const audioPool = new Map<string, HTMLAudioElement>()
+const unlockedEls = new WeakSet<HTMLAudioElement>()
 let currentCloudEl: HTMLAudioElement | null = null
 
 function getPooledAudio(word: string): HTMLAudioElement {
@@ -30,11 +31,12 @@ function getPooledAudio(word: string): HTMLAudioElement {
 }
 
 function unlockEl(el: HTMLAudioElement) {
-  if (!el.paused) return
+  if (!el.paused || unlockedEls.has(el)) return
   el.muted = true
   const p = el.play()
   if (p)
     p.then(() => {
+      unlockedEls.add(el) // 播放成功才算真正解锁（持久有效），失败则留给下次手势重试
       el.pause()
       el.muted = false
     }).catch(() => {
