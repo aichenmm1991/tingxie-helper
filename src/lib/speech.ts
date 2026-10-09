@@ -14,6 +14,7 @@ const youdaoUrl = (text: string) =>
 // 之后朗读 / 重读 / 自动念下一个全部瞬时播放，不再等网络
 const audioPool = new Map<string, HTMLAudioElement>()
 const unlockedEls = new WeakSet<HTMLAudioElement>()
+const failSet = new Set<string>() // 词典确认未收录（SRC_NOT_SUPPORTED）的片段，本会话内直接拆分不再请求
 let currentCloudEl: HTMLAudioElement | null = null
 
 function getPooledAudio(word: string): HTMLAudioElement {
@@ -36,6 +37,7 @@ function unlockEl(el: HTMLAudioElement) {
   const p = el.play()
   if (p)
     p.then(() => {
+      if (!el.muted) return // 已被正式播放接管，不要 pause 它
       unlockedEls.add(el) // 播放成功才算真正解锁（持久有效），失败则留给下次手势重试
       el.pause()
       el.muted = false
@@ -95,11 +97,20 @@ function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () 
         return
       }
       const text = units[i]
+      // 已知词典未收录的片段直接拆分，不再浪费网络请求
+      if (failSet.has(text)) {
+        const parts = splitUnit(text)
+        if (parts) units.splice(i, 1, ...parts)
+        else i++
+        next()
+        return
+      }
       const el = getPooledAudio(text)
       currentCloudEl = el
       const my = ++attempt
       const fail = () => {
         if (myToken !== token || my !== attempt) return
+        if (el.error?.code === 4) failSet.add(text) // SRC_NOT_SUPPORTED：确认未收录
         const parts = splitUnit(text)
         if (parts) units.splice(i, 1, ...parts)
         else i++
@@ -113,6 +124,7 @@ function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () 
       }
       try {
         el.pause()
+        el.muted = false // 标记为正式播放，迟到的解锁回调不得 pause 它
         if (el.readyState >= 1) el.currentTime = 0
         el.playbackRate = opts.rate
         const p = el.play()
