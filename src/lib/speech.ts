@@ -3,15 +3,13 @@
 
 let token = 0
 
-// ---------- 云端 TTS 兜底（无本机语音的浏览器：微信/UC/部分安卓浏览器等） ----------
-// 云端音源按优先级排列，播放失败自动切换下一个：
-// 1. 百度翻译 TTS——播音级标准普通话，按语境朗读（多音字更准）
-// 2. 有道词典发音接口——词典级单字/词读音
-// 均为免 key 接口；<audio> 播放不受跨域限制
-const CLOUD_SOURCES: Array<(text: string) => string> = [
-  (t) => `https://fanyi.baidu.com/gettts?lan=zh&text=${encodeURIComponent(t)}&spd=3&source=web`,
-  (t) => `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(t)}&le=zh`,
-]
+// ---------- 云端 TTS 兜底（无合格本机语音的浏览器：微信/UC/部分安卓浏览器等） ----------
+// 音源：有道词典发音接口——词典级标准普通话，任意中文文本返回 mp3，<audio> 播放不受跨域限制。
+// 为什么不用别家（2026-10 实测）：
+// - 百度 fanyi gettts：响应带 Content-Disposition: attachment，浏览器禁止用 <audio> 播放
+// - 微软 Edge TTS：WebSocket 接口校验 Origin，只允许自家扩展来源，纯网页连不上
+const youdaoUrl = (text: string) =>
+  `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&le=zh`
 
 // 全局共享一个 <audio>：iOS 只放行「在真实用户手势里播放过」的元素，复用同一元素最稳
 let sharedAudio: HTMLAudioElement | null = null
@@ -61,40 +59,30 @@ function nativeUsable(voiceURI?: string): boolean {
   }
 }
 
-/** 云端 TTS 朗读一个词，接口与 speakWord 相同；音源按 CLOUD_SOURCES 顺序自动降级 */
+/** 云端 TTS 朗读一个词，接口与 speakWord 相同 */
 function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
   const myToken = ++token
   const a = getSharedAudio()
   let round = 0
   let timer: ReturnType<typeof setTimeout> | undefined
-  let srcIdx = 0
   let attempt = 0
 
-  const tryPlay = () => {
+  const once = () => {
     if (myToken !== token) return
     const my = ++attempt
     const fail = () => {
-      if (myToken !== token || my !== attempt) return
-      srcIdx++
-      if (srcIdx < CLOUD_SOURCES.length) tryPlay()
-      else onDone?.()
+      if (myToken === token && my === attempt) onDone?.()
     }
     a.onerror = () => fail()
     try {
       a.pause()
-      a.src = CLOUD_SOURCES[srcIdx](word)
+      a.src = youdaoUrl(word)
       a.playbackRate = opts.rate
       const p = a.play()
       if (p) p.catch(fail)
     } catch {
       fail()
     }
-  }
-
-  const once = () => {
-    if (myToken !== token) return
-    srcIdx = 0
-    tryPlay()
   }
 
   a.onended = () => {
