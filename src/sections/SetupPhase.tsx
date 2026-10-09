@@ -8,7 +8,7 @@ import {
   loadWrongBook,
   removeFromWrongBook,
 } from '../lib/store'
-import { getMainlandVoices, speakWord, ttsSupported } from '../lib/speech'
+import { getMainlandVoices, speakWord, ttsSupported, unlockAudio } from '../lib/speech'
 import { recognizeWords, parseOcrText, type OcrProgress } from '../lib/ocr'
 
 interface Props {
@@ -105,6 +105,7 @@ export default function SetupPhase({ settings, onSettingsChange, onStart }: Prop
 
   const startDirect = () => {
     if (parsed.length === 0) return
+    unlockAudio()
     onStart(parsed, name.trim() || '临时听写')
   }
 
@@ -346,7 +347,10 @@ export default function SetupPhase({ settings, onSettingsChange, onStart }: Prop
                   </div>
                 </div>
                 <button
-                  onClick={() => onStart(l.words, l.name)}
+                  onClick={() => {
+                    unlockAudio()
+                    onStart(l.words, l.name)
+                  }}
                   className="shrink-0 rounded-xl bg-orange-500 px-4 py-2.5 font-bold text-white shadow-md shadow-orange-200 transition hover:bg-orange-600 active:scale-95"
                 >
                   开始
@@ -396,7 +400,10 @@ export default function SetupPhase({ settings, onSettingsChange, onStart }: Prop
               ))}
             </div>
             <button
-              onClick={() => onStart(wrongBook, '错词本复习')}
+              onClick={() => {
+                unlockAudio()
+                onStart(wrongBook, '错词本复习')
+              }}
               className="mt-4 w-full rounded-2xl bg-rose-500 px-6 py-3.5 text-lg font-bold text-white shadow-md shadow-rose-200 transition hover:bg-rose-600 active:scale-[0.98]"
             >
               🔁 听写错词（{wrongBook.length} 个）

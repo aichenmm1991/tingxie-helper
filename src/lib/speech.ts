@@ -3,6 +3,102 @@
 
 let token = 0
 
+// ---------- 云端 TTS 兜底（无本机语音的浏览器：微信/UC/部分安卓浏览器等） ----------
+// 有道词典发音接口：任意中文文本返回 mp3，<audio> 播放不受跨域限制
+const cloudUrl = (text: string) =>
+  `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&le=zh`
+
+// 全局共享一个 <audio>：iOS 只放行「在真实用户手势里播放过」的元素，复用同一元素最稳
+let sharedAudio: HTMLAudioElement | null = null
+
+function getSharedAudio(): HTMLAudioElement {
+  if (!sharedAudio) {
+    sharedAudio = new Audio()
+    sharedAudio.preload = 'auto'
+  }
+  return sharedAudio
+}
+
+// 无声 WAV：用于在首次用户手势中解锁共享音频元素
+const SILENT_WAV =
+  'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA='
+
+/** 在用户手势（如「开始听写」点击）里调用，解锁共享音频元素 */
+export function unlockAudio() {
+  if (typeof window === 'undefined') return
+  const a = getSharedAudio()
+  if (!a.src) a.src = SILENT_WAV
+  if (!a.paused) return
+  a.muted = true
+  const p = a.play()
+  if (p)
+    p.then(() => {
+      a.pause()
+      a.muted = false
+    }).catch(() => {
+      a.muted = false
+    })
+}
+
+/** 本机语音是否真正可用：API 存在且声音列表非空（部分安卓浏览器有 API 但列表为空、实际不出声） */
+function nativeUsable(): boolean {
+  if (!ttsSupported) return false
+  try {
+    return window.speechSynthesis.getVoices().length > 0
+  } catch {
+    return false
+  }
+}
+
+/** 云端 TTS 朗读一个词，接口与 speakWord 相同 */
+function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
+  const myToken = ++token
+  const a = getSharedAudio()
+  let round = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const once = () => {
+    if (myToken !== token) return
+    try {
+      a.pause()
+      a.src = cloudUrl(word)
+      const p = a.play()
+      if (p)
+        p.catch(() => {
+          if (myToken === token) onDone?.()
+        })
+    } catch {
+      onDone?.()
+    }
+  }
+
+  a.onended = () => {
+    if (myToken !== token) return
+    round++
+    if (round < opts.times) {
+      timer = setTimeout(once, opts.gapMs)
+    } else {
+      onDone?.()
+    }
+  }
+  a.onerror = () => {
+    if (myToken !== token) return
+    onDone?.()
+  }
+
+  once()
+
+  return () => {
+    if (myToken === token) token++
+    if (timer) clearTimeout(timer)
+    try {
+      a.pause()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /** 判断是否为大陆普通话声音（排除台湾、香港、粤语） */
 export function isMainlandVoice(v: SpeechSynthesisVoice): boolean {
   const lang = v.lang.replace('_', '-')
@@ -63,6 +159,11 @@ export const ttsSupported =
 export function stopSpeaking() {
   token++
   if (ttsSupported) window.speechSynthesis.cancel()
+  try {
+    sharedAudio?.pause()
+  } catch {
+    /* ignore */
+  }
 }
 
 export interface SpeakOpts {
@@ -77,9 +178,8 @@ export interface SpeakOpts {
  * 返回一个取消函数。
  */
 export function speakWord(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
-  if (!ttsSupported) {
-    onDone?.()
-    return () => {}
+  if (!nativeUsable()) {
+    return speakWordCloud(word, opts, onDone)
   }
   const myToken = ++token
   window.speechSynthesis.cancel()

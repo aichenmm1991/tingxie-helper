@@ -138,8 +138,8 @@ export default function DictationPhase({ title, words, settings, onFinish, onQui
       </div>
 
       {!ttsSupported && (
-        <div className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-center text-sm text-red-600">
-          当前浏览器不支持语音朗读，请使用 Chrome / Edge / Safari 打开
+        <div className="mt-4 rounded-xl bg-sky-50 px-4 py-3 text-center text-sm text-sky-600">
+          当前浏览器将使用在线语音朗读，请保持网络畅通 ☁️
         </div>
       )}
 
