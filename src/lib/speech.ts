@@ -44,10 +44,20 @@ function unlockEl(el: HTMLAudioElement) {
     })
 }
 
-/** 在用户手势（如「开始听写」点击）里调用：预创建并解锁整组词的云端音频 */
+/** 在用户手势（如「开始听写」点击）里调用：预创建并解锁整组词的云端音频。
+ *  除了整词，还预建降级拆分片段（四字词的 2+2、更长词的单字），保证降级播放同样瞬时。 */
 export function unlockAudio(words: string[] = []) {
   if (typeof window === 'undefined' || nativeUsable()) return
-  words.forEach((w) => unlockEl(getPooledAudio(w)))
+  const all = new Set<string>()
+  for (const w of words) {
+    all.add(w)
+    if (w.length === 4) {
+      all.add(w.slice(0, 2))
+      all.add(w.slice(2))
+    }
+    if (w.length > 2) for (const ch of w) all.add(ch)
+  }
+  all.forEach((t) => unlockEl(getPooledAudio(t)))
 }
 
 // 之后每次点击/触摸，顺手解锁新入池的元素（覆盖会话中后加的词）
@@ -58,23 +68,65 @@ if (typeof window !== 'undefined') {
   )
 }
 
-/** 云端朗读一个词，接口与 speakWord 相同 */
+/** 把读不了的片段继续拆小：四字词 2+2，更长的一分为二，二字及以下不可再拆 */
+function splitUnit(text: string): string[] | null {
+  const len = text.length
+  if (len <= 2) return null
+  if (len === 4) return [text.slice(0, 2), text.slice(2)]
+  const mid = Math.ceil(len / 2)
+  return [text.slice(0, mid), text.slice(mid)]
+}
+
+/** 云端朗读一个词，接口与 speakWord 相同。
+ *  整词没有读音时（成语等），自动按 2+2 / 逐字拆分朗读，读音均为词典标准音。 */
 function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
   const myToken = ++token
   let round = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let attempt = 0
 
+  // 依次播放片段；某片段读不了就拆小重试，单字也读不了则跳过
+  const playUnits = (units: string[], done: () => void) => {
+    let i = 0
+    const next = () => {
+      if (myToken !== token) return
+      if (i >= units.length) {
+        done()
+        return
+      }
+      const text = units[i]
+      const el = getPooledAudio(text)
+      currentCloudEl = el
+      const my = ++attempt
+      const fail = () => {
+        if (myToken !== token || my !== attempt) return
+        const parts = splitUnit(text)
+        if (parts) units.splice(i, 1, ...parts)
+        else i++
+        next()
+      }
+      el.onerror = () => fail()
+      el.onended = () => {
+        if (myToken !== token || my !== attempt) return
+        i++
+        timer = setTimeout(next, 250) // 片段间小停顿，模拟词语节奏
+      }
+      try {
+        el.pause()
+        if (el.readyState >= 1) el.currentTime = 0
+        el.playbackRate = opts.rate
+        const p = el.play()
+        if (p) p.catch(fail)
+      } catch {
+        fail()
+      }
+    }
+    next()
+  }
+
   const once = () => {
     if (myToken !== token) return
-    const my = ++attempt
-    const fail = () => {
-      if (myToken === token && my === attempt) onDone?.()
-    }
-    const el = getPooledAudio(word)
-    currentCloudEl = el
-    el.onerror = () => fail()
-    el.onended = () => {
+    playUnits([word], () => {
       if (myToken !== token) return
       round++
       if (round < opts.times) {
@@ -82,16 +134,7 @@ function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () 
       } else {
         onDone?.()
       }
-    }
-    try {
-      el.pause()
-      if (el.readyState >= 1) el.currentTime = 0
-      el.playbackRate = opts.rate
-      const p = el.play()
-      if (p) p.catch(fail)
-    } catch {
-      fail()
-    }
+    })
   }
 
   once()
