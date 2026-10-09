@@ -4,9 +4,14 @@
 let token = 0
 
 // ---------- 云端 TTS 兜底（无本机语音的浏览器：微信/UC/部分安卓浏览器等） ----------
-// 有道词典发音接口：任意中文文本返回 mp3，<audio> 播放不受跨域限制
-const cloudUrl = (text: string) =>
-  `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&le=zh`
+// 云端音源按优先级排列，播放失败自动切换下一个：
+// 1. 百度翻译 TTS——播音级标准普通话，按语境朗读（多音字更准）
+// 2. 有道词典发音接口——词典级单字/词读音
+// 均为免 key 接口；<audio> 播放不受跨域限制
+const CLOUD_SOURCES: Array<(text: string) => string> = [
+  (t) => `https://fanyi.baidu.com/gettts?lan=zh&text=${encodeURIComponent(t)}&spd=3&source=web`,
+  (t) => `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(t)}&le=zh`,
+]
 
 // 全局共享一个 <audio>：iOS 只放行「在真实用户手势里播放过」的元素，复用同一元素最稳
 let sharedAudio: HTMLAudioElement | null = null
@@ -40,36 +45,56 @@ export function unlockAudio() {
     })
 }
 
-/** 本机语音是否真正可用：API 存在且声音列表非空（部分安卓浏览器有 API 但列表为空、实际不出声） */
-function nativeUsable(): boolean {
+/** 本机语音是否达到国标要求：API 存在、有中文声音、且是值得信赖的引擎（微软/谷歌/苹果）。
+ *  手机厂商自带引擎口音/机械感重，不用它，改走云端。 */
+function nativeUsable(voiceURI?: string): boolean {
   if (!ttsSupported) return false
   try {
-    return window.speechSynthesis.getVoices().length > 0
+    const voices = window.speechSynthesis.getVoices()
+    if (voices.length === 0) return false
+    if (voiceURI) return voices.some((v) => v.voiceURI === voiceURI)
+    const v = pickVoice()
+    if (!v) return false // 没有任何中文声音
+    return voiceScore(v) >= 60
   } catch {
     return false
   }
 }
 
-/** 云端 TTS 朗读一个词，接口与 speakWord 相同 */
+/** 云端 TTS 朗读一个词，接口与 speakWord 相同；音源按 CLOUD_SOURCES 顺序自动降级 */
 function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
   const myToken = ++token
   const a = getSharedAudio()
   let round = 0
   let timer: ReturnType<typeof setTimeout> | undefined
+  let srcIdx = 0
+  let attempt = 0
+
+  const tryPlay = () => {
+    if (myToken !== token) return
+    const my = ++attempt
+    const fail = () => {
+      if (myToken !== token || my !== attempt) return
+      srcIdx++
+      if (srcIdx < CLOUD_SOURCES.length) tryPlay()
+      else onDone?.()
+    }
+    a.onerror = () => fail()
+    try {
+      a.pause()
+      a.src = CLOUD_SOURCES[srcIdx](word)
+      a.playbackRate = opts.rate
+      const p = a.play()
+      if (p) p.catch(fail)
+    } catch {
+      fail()
+    }
+  }
 
   const once = () => {
     if (myToken !== token) return
-    try {
-      a.pause()
-      a.src = cloudUrl(word)
-      const p = a.play()
-      if (p)
-        p.catch(() => {
-          if (myToken === token) onDone?.()
-        })
-    } catch {
-      onDone?.()
-    }
+    srcIdx = 0
+    tryPlay()
   }
 
   a.onended = () => {
@@ -80,10 +105,6 @@ function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () 
     } else {
       onDone?.()
     }
-  }
-  a.onerror = () => {
-    if (myToken !== token) return
-    onDone?.()
   }
 
   once()
@@ -178,7 +199,7 @@ export interface SpeakOpts {
  * 返回一个取消函数。
  */
 export function speakWord(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
-  if (!nativeUsable()) {
+  if (!nativeUsable(opts.voiceURI)) {
     return speakWordCloud(word, opts, onDone)
   }
   const myToken = ++token
