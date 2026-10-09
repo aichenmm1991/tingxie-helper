@@ -1,68 +1,64 @@
-// 浏览器语音朗读封装（Web Speech API）
-// 严格使用「中国大陆标准普通话」声音，排除台湾腔、粤语等非国标读音
+// 浏览器语音朗读封装（Web Speech API + 云端词典发音兜底）
+// 发音标准：只使用「中国大陆标准普通话」——本机只信微软/谷歌/苹果引擎，
+// 其余情况（微信/UC/部分安卓浏览器）走云端词典级标准音。
 
 let token = 0
 
-// ---------- 云端 TTS 兜底（无合格本机语音的浏览器：微信/UC/部分安卓浏览器等） ----------
-// 音源：有道词典发音接口——词典级标准普通话，任意中文文本返回 mp3，<audio> 播放不受跨域限制。
-// 为什么不用别家（2026-10 实测）：
-// - 百度 fanyi gettts：响应带 Content-Disposition: attachment，浏览器禁止用 <audio> 播放
-// - 微软 Edge TTS：WebSocket 接口校验 Origin，只允许自家扩展来源，纯网页连不上
+// ---------- 云端兜底音源 ----------
+// 有道词典发音接口：词典级标准普通话，任意中文文本返回 mp3，<audio> 播放不受跨域限制。
+// 实测排除项（2026-10）：百度 gettts 带 attachment 头浏览器禁播；Edge TTS 校验 Origin 网页端不可用。
 const youdaoUrl = (text: string) =>
   `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&le=zh`
 
-// 全局共享一个 <audio>：iOS 只放行「在真实用户手势里播放过」的元素，复用同一元素最稳
-let sharedAudio: HTMLAudioElement | null = null
+// ---------- 云端音频池：每词一个 <audio>，开始听写时整组预加载并在手势里静音解锁 ----------
+// 之后朗读 / 重读 / 自动念下一个全部瞬时播放，不再等网络
+const audioPool = new Map<string, HTMLAudioElement>()
+let currentCloudEl: HTMLAudioElement | null = null
 
-function getSharedAudio(): HTMLAudioElement {
-  if (!sharedAudio) {
-    sharedAudio = new Audio()
-    sharedAudio.preload = 'auto'
+function getPooledAudio(word: string): HTMLAudioElement {
+  let el = audioPool.get(word)
+  if (!el) {
+    if (audioPool.size > 200) {
+      const oldest = audioPool.keys().next().value
+      if (oldest !== undefined) audioPool.delete(oldest)
+    }
+    el = new Audio(youdaoUrl(word))
+    el.preload = 'auto'
+    audioPool.set(word, el)
   }
-  return sharedAudio
+  return el
 }
 
-// 无声 WAV：用于在首次用户手势中解锁共享音频元素
-const SILENT_WAV =
-  'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA='
-
-/** 在用户手势（如「开始听写」点击）里调用，解锁共享音频元素 */
-export function unlockAudio() {
-  if (typeof window === 'undefined') return
-  const a = getSharedAudio()
-  if (!a.src) a.src = SILENT_WAV
-  if (!a.paused) return
-  a.muted = true
-  const p = a.play()
+function unlockEl(el: HTMLAudioElement) {
+  if (!el.paused) return
+  el.muted = true
+  const p = el.play()
   if (p)
     p.then(() => {
-      a.pause()
-      a.muted = false
+      el.pause()
+      el.muted = false
     }).catch(() => {
-      a.muted = false
+      el.muted = false
     })
 }
 
-/** 本机语音是否达到国标要求：API 存在、有中文声音、且是值得信赖的引擎（微软/谷歌/苹果）。
- *  手机厂商自带引擎口音/机械感重，不用它，改走云端。 */
-function nativeUsable(voiceURI?: string): boolean {
-  if (!ttsSupported) return false
-  try {
-    const voices = window.speechSynthesis.getVoices()
-    if (voices.length === 0) return false
-    if (voiceURI) return voices.some((v) => v.voiceURI === voiceURI)
-    const v = pickVoice()
-    if (!v) return false // 没有任何中文声音
-    return voiceScore(v) >= 60
-  } catch {
-    return false
-  }
+/** 在用户手势（如「开始听写」点击）里调用：预创建并解锁整组词的云端音频 */
+export function unlockAudio(words: string[] = []) {
+  if (typeof window === 'undefined' || nativeUsable()) return
+  words.forEach((w) => unlockEl(getPooledAudio(w)))
 }
 
-/** 云端 TTS 朗读一个词，接口与 speakWord 相同 */
+// 之后每次点击/触摸，顺手解锁新入池的元素（覆盖会话中后加的词）
+if (typeof window !== 'undefined') {
+  const sweep = () => audioPool.forEach(unlockEl)
+  ;['pointerdown', 'touchstart', 'click'].forEach((ev) =>
+    window.addEventListener(ev, sweep, { capture: true, passive: true })
+  )
+}
+
+/** 云端朗读一个词，接口与 speakWord 相同 */
 function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () => void {
   const myToken = ++token
-  const a = getSharedAudio()
   let round = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let attempt = 0
@@ -73,25 +69,26 @@ function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () 
     const fail = () => {
       if (myToken === token && my === attempt) onDone?.()
     }
-    a.onerror = () => fail()
+    const el = getPooledAudio(word)
+    currentCloudEl = el
+    el.onerror = () => fail()
+    el.onended = () => {
+      if (myToken !== token) return
+      round++
+      if (round < opts.times) {
+        timer = setTimeout(once, opts.gapMs)
+      } else {
+        onDone?.()
+      }
+    }
     try {
-      a.pause()
-      a.src = youdaoUrl(word)
-      a.playbackRate = opts.rate
-      const p = a.play()
+      el.pause()
+      if (el.readyState >= 1) el.currentTime = 0
+      el.playbackRate = opts.rate
+      const p = el.play()
       if (p) p.catch(fail)
     } catch {
       fail()
-    }
-  }
-
-  a.onended = () => {
-    if (myToken !== token) return
-    round++
-    if (round < opts.times) {
-      timer = setTimeout(once, opts.gapMs)
-    } else {
-      onDone?.()
     }
   }
 
@@ -101,12 +98,14 @@ function speakWordCloud(word: string, opts: SpeakOpts, onDone?: () => void): () 
     if (myToken === token) token++
     if (timer) clearTimeout(timer)
     try {
-      a.pause()
+      currentCloudEl?.pause()
     } catch {
       /* ignore */
     }
   }
 }
+
+// ---------- 本机语音（Web Speech API） ----------
 
 /** 判断是否为大陆普通话声音（排除台湾、香港、粤语） */
 export function isMainlandVoice(v: SpeechSynthesisVoice): boolean {
@@ -165,11 +164,27 @@ if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
 export const ttsSupported =
   typeof window !== 'undefined' && 'speechSynthesis' in window
 
+/** 本机语音是否达到国标要求：API 存在、有中文声音、且是值得信赖的引擎（微软/谷歌/苹果）。
+ *  手机厂商自带引擎口音/机械感重，不用它，改走云端。 */
+function nativeUsable(voiceURI?: string): boolean {
+  if (!ttsSupported) return false
+  try {
+    const voices = window.speechSynthesis.getVoices()
+    if (voices.length === 0) return false
+    if (voiceURI) return voices.some((v) => v.voiceURI === voiceURI)
+    const v = pickVoice()
+    if (!v) return false // 没有任何中文声音
+    return voiceScore(v) >= 60
+  } catch {
+    return false
+  }
+}
+
 export function stopSpeaking() {
   token++
   if (ttsSupported) window.speechSynthesis.cancel()
   try {
-    sharedAudio?.pause()
+    currentCloudEl?.pause()
   } catch {
     /* ignore */
   }

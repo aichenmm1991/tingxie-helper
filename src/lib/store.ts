@@ -84,9 +84,18 @@ export function saveSettings(s: Settings) {
 /** 把家长粘贴的文本解析成词语数组：按换行/逗号/顿号/分号/空格切分，去重且保持顺序 */
 export function parseWords(text: string): string[] {
   const parts = text
-    .split(/[\n,，、;；\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+    .split(/\n+/)
+    .flatMap((line) =>
+      line
+        // 去掉行首列表编号："1." "2、" "(3)" "④" "一、" "5 苹果" 等
+        .replace(
+          /^\s*(?:[\(（【\[]?\d+[\)）】\]]?|[①-⑳]|[零一二三四五六七八九十]+)\s*(?:[、.．:：\-]|\s)\s*/,
+          ''
+        )
+        .split(/[,，、;；\s]+/)
+    )
+    .map((s) => s.replace(/^[.。．,，、;；!！?？]+|[.。．,，、;；!！?？]+$/g, '').trim())
+    .filter((s) => s.length > 0 && !/^\d+$/.test(s))
   const seen = new Set<string>()
   const out: string[] = []
   for (const p of parts) {
